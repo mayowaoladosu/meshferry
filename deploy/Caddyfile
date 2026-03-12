@@ -1,0 +1,32 @@
+{
+  admin off
+}
+
+(origin_tls) {
+  tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
+}
+
+meshferry.tech, www.meshferry.tech {
+  import origin_tls
+  respond "MeshFerry origin is online." 200
+}
+
+app.meshferry.tech {
+  import origin_tls
+  respond "MeshFerry dashboard is not deployed yet." 200
+}
+
+api.meshferry.tech {
+  import origin_tls
+  reverse_proxy meshferry:7000
+}
+
+connect.meshferry.tech {
+  import origin_tls
+  reverse_proxy meshferry:7000
+}
+
+*.meshferry.tech {
+  import origin_tls
+  reverse_proxy meshferry:8080
+}

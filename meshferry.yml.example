@@ -1,0 +1,14 @@
+server: http://127.0.0.1:7000
+token: meshferry-dev-token
+
+tunnel:
+  local: 3000
+  subdomain: demo
+
+tunnels:
+  app:
+    local: 3000
+    subdomain: app
+  docs:
+    local: http://127.0.0.1:4173
+    subdomain: docs

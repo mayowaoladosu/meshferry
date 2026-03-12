@@ -1,0 +1,54 @@
+{
+  "name": "meshferry",
+  "version": "0.1.0",
+  "description": "An open source secure tunnel gateway for self-hosters and small teams.",
+  "type": "module",
+  "main": "dist/cli/index.js",
+  "bin": {
+    "meshferry": "dist/cli/index.js",
+    "meshferry-server": "dist/server/index.js",
+    "meshferry-agent": "dist/agent/index.js"
+  },
+  "files": [
+    "dist",
+    "meshferry.yml.example",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "DEPLOYMENT.md",
+    "ROADMAP.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "node scripts/smoke.mjs",
+    "dev:cli": "tsx src/cli/index.ts",
+    "dev:server": "tsx src/server/index.ts",
+    "dev:agent": "tsx src/agent/index.ts",
+    "start:server": "node dist/server/index.js",
+    "start:agent": "node dist/agent/index.js",
+    "start:cli": "node dist/cli/index.js"
+  },
+  "keywords": [
+    "tunnel",
+    "reverse-proxy",
+    "gateway",
+    "self-hosted",
+    "websocket"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.3",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

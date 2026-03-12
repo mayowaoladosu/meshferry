@@ -1,0 +1,12 @@
+services:
+  meshferry:
+    build: .
+    environment:
+      MESHFERRY_AUTH_TOKENS: ${MESHFERRY_AUTH_TOKENS:-meshferry-dev-token}
+      MESHFERRY_CONTROL_PORT: 7000
+      MESHFERRY_EDGE_PORT: 8080
+      MESHFERRY_PUBLIC_HOST: ${MESHFERRY_PUBLIC_HOST:-localhost}
+      MESHFERRY_REQUEST_TIMEOUT_MS: 30000
+    ports:
+      - "7000:7000"
+      - "8080:8080"

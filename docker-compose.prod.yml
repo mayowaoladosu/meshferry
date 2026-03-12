@@ -1,0 +1,33 @@
+services:
+  meshferry:
+    build: .
+    restart: unless-stopped
+    environment:
+      MESHFERRY_AUTH_TOKENS: ${MESHFERRY_AUTH_TOKENS}
+      MESHFERRY_CONTROL_PORT: 7000
+      MESHFERRY_EDGE_PORT: 8080
+      MESHFERRY_PUBLIC_HOST: ${MESHFERRY_PUBLIC_HOST:-meshferry.tech}
+      MESHFERRY_PUBLIC_SCHEME: ${MESHFERRY_PUBLIC_SCHEME:-https}
+      MESHFERRY_RESERVED_SUBDOMAINS: ${MESHFERRY_RESERVED_SUBDOMAINS:-app,api,connect,www,admin,status}
+      MESHFERRY_REQUEST_TIMEOUT_MS: ${MESHFERRY_REQUEST_TIMEOUT_MS:-30000}
+    expose:
+      - "7000"
+      - "8080"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - meshferry
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/certs:/etc/caddy/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:
