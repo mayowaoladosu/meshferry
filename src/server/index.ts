@@ -16,7 +16,7 @@ import {
 } from "../protocol.js";
 import { generateReadableSubdomain } from "./name-generator.js";
 
-const CONTROL_PORT = parseNumber(process.env.MESHFERRY_CONTROL_PORT, 7000);
+const CONTROL_PORT = parseNumber(process.env.MESHFERRY_CONTROL_PORT ?? process.env.PORT, 7000);
 const EDGE_PORT = parseNumber(process.env.MESHFERRY_EDGE_PORT, 8080);
 const PUBLIC_HOST = process.env.MESHFERRY_PUBLIC_HOST ?? "meshferry.localhost";
 const PUBLIC_SCHEME = process.env.MESHFERRY_PUBLIC_SCHEME ?? inferPublicScheme(PUBLIC_HOST);

@@ -159,7 +159,10 @@ MESHFERRY_PUBLIC_HOST=meshferry.tech
 MESHFERRY_PUBLIC_SCHEME=https
 MESHFERRY_RESERVED_SUBDOMAINS=app,api,connect,www,admin,status
 MESHFERRY_REQUEST_TIMEOUT_MS=30000
+PORT=7000
 ```
+
+There is a ready-to-copy example file in `.env.railway.example`.
 
 4. In Railway networking, add `connect.meshferry.tech` and select target port `7000`.
 5. In Railway networking, add `*.meshferry.tech` and select target port `8080`.

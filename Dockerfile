@@ -1,7 +1,7 @@
 FROM node:24-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 FROM deps AS build
 COPY tsconfig.json ./
@@ -12,7 +12,7 @@ FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 EXPOSE 7000 8080
 CMD ["node", "dist/server/index.js"]
