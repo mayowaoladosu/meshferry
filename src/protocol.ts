@@ -60,11 +60,12 @@ export function sanitizeIncomingRequestHeaders(headers: IncomingHttpHeaders): Re
   const clean: Record<string, string> = {};
 
   for (const [name, value] of Object.entries(headers)) {
-    if (!value || isHopByHopHeader(name) || name.toLowerCase() === "host") {
+    const lower = name.toLowerCase();
+    if (!value || isHopByHopHeader(name) || lower === "host" || lower === "accept-encoding") {
       continue;
     }
 
-    clean[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : value;
+    clean[lower] = Array.isArray(value) ? value.join(", ") : value;
   }
 
   return clean;
@@ -74,11 +75,12 @@ export function sanitizeOutgoingResponseHeaders(headers: Headers): Record<string
   const clean: Record<string, string> = {};
 
   headers.forEach((value, name) => {
-    if (isHopByHopHeader(name) || name.toLowerCase() === "content-length") {
+    const lower = name.toLowerCase();
+    if (isHopByHopHeader(name) || lower === "content-length" || lower === "content-encoding") {
       return;
     }
 
-    clean[name.toLowerCase()] = value;
+    clean[lower] = value;
   });
 
   return clean;
@@ -88,11 +90,12 @@ export function sanitizeAgentResponseHeaders(headers: Record<string, string>): R
   const clean: Record<string, string> = {};
 
   for (const [name, value] of Object.entries(headers)) {
-    if (isHopByHopHeader(name) || name.toLowerCase() === "content-length") {
+    const lower = name.toLowerCase();
+    if (isHopByHopHeader(name) || lower === "content-length" || lower === "content-encoding") {
       continue;
     }
 
-    clean[name.toLowerCase()] = value;
+    clean[lower] = value;
   }
 
   return clean;
