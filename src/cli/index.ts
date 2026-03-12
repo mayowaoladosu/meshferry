@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { createAgentConfig, runAgent } from "../agent/core.js";
+import { readFileSync } from "node:fs";
+import { createAgentConfig, runAgentWithReporter, type AgentConfig, type AgentReporter } from "../agent/core.js";
 import { deriveTargetSubdomain, loadMeshFerryConfig, pickTunnelProfile, readConfigValue } from "./config.js";
 
 interface ParsedArgs {
@@ -14,15 +15,26 @@ try {
   await main(argv);
 } catch (error) {
   const message = error instanceof Error ? error.message : "Unhandled MeshFerry CLI error.";
-  console.error(`[meshferry] ${message}`);
+  console.error(`Error: ${message}`);
   process.exitCode = 1;
 }
 
 async function main(args: string[]): Promise<void> {
   const first = args[0];
 
-  if (!first || first === "help" || first === "--help" || first === "-h") {
+  if (!first) {
+    printHelp("Please specify a command or port.");
+    process.exitCode = 1;
+    return;
+  }
+
+  if (first === "help" || first === "--help" || first === "-h") {
     printHelp();
+    return;
+  }
+
+  if (first === "version" || first === "--version" || first === "-v") {
+    console.log(`meshferry ${readVersion()}`);
     return;
   }
 
@@ -42,7 +54,7 @@ async function main(args: string[]): Promise<void> {
   }
 
   if (first === "server") {
-    console.error("[meshferry] Use `meshferry-server` to start the public gateway.");
+    console.error("Use `meshferry-server` to start the public gateway.");
     process.exitCode = 1;
     return;
   }
@@ -75,10 +87,6 @@ async function handleHttpCommand(args: string[]): Promise<void> {
       ? ""
       : explicitSubdomain ?? (isLocalServer(server) ? deriveTargetSubdomain(target, process.cwd()) : "");
 
-  if (loadedConfig) {
-    console.log(`[meshferry] using config ${loadedConfig.path}`);
-  }
-
   const agentConfig = createAgentConfig({
     server,
     local: target,
@@ -86,7 +94,7 @@ async function handleHttpCommand(args: string[]): Promise<void> {
     token: getStringFlag(parsed, "token") ?? loadedConfig?.config.token
   });
 
-  process.exitCode = await runAgent(agentConfig);
+  process.exitCode = await runAgentWithReporter(agentConfig, createCliReporter(agentConfig));
 }
 
 async function handleUpCommand(args: string[]): Promise<void> {
@@ -120,11 +128,6 @@ async function handleUpCommand(args: string[]): Promise<void> {
       ? ""
       : explicitSubdomain ?? (isLocalServer(server) ? deriveTargetSubdomain(localTarget, process.cwd(), profileName) : "");
 
-  console.log(`[meshferry] using config ${loadedConfig.path}`);
-  if (profileName) {
-    console.log(`[meshferry] using tunnel profile "${profileName}"`);
-  }
-
   const agentConfig = createAgentConfig({
     server,
     local: localTarget,
@@ -132,7 +135,7 @@ async function handleUpCommand(args: string[]): Promise<void> {
     token: getStringFlag(parsed, "token") ?? loadedConfig.config.token
   });
 
-  process.exitCode = await runAgent(agentConfig);
+  process.exitCode = await runAgentWithReporter(agentConfig, createCliReporter(agentConfig, loadedConfig.path, profileName));
 }
 
 async function handleStatusCommand(args: string[]): Promise<void> {
@@ -232,7 +235,12 @@ function getStringFlag(parsed: ParsedArgs, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function printHelp(): void {
+function printHelp(error?: string): void {
+  if (error) {
+    console.error(error);
+    console.error("");
+  }
+
   console.log(`MeshFerry
 
 Usage:
@@ -240,22 +248,27 @@ Usage:
   meshferry http 3000 --subdomain demo
   meshferry up [profile]
   meshferry status [--json]
+  meshferry version
+  meshferry help
 
 Commands:
-  meshferry 3000              Expose a local port through MeshFerry
-  meshferry http 3000         Explicit form of the same command
-  meshferry up                Start a tunnel from meshferry.yml
-  meshferry up blog           Start a named tunnel profile from config
-  meshferry status            Show active tunnels on the control server
+  meshferry <port>            Start an HTTP tunnel
+  meshferry http <port>       Start an HTTP tunnel
+  meshferry up [profile]      Start a tunnel from meshferry.yml
+  meshferry status            Show active tunnels
+  meshferry version           Show version
+  meshferry help              Show this help message
 
 Options:
-  --server <url>              MeshFerry control server, default http://127.0.0.1:7000
+  --server <url>              Control server URL
   --local <target>            Local port or URL, used with up
   --subdomain <name>          Requested subdomain
-  --random                    Let the server generate a random public subdomain
+  --random                    Let MeshFerry generate a public subdomain
   --token <token>             Agent auth token
   --config <path>             Path to meshferry.yml
   --json                      Print status output as JSON
+  -v, --version               Show version
+  -h, --help                  Show this help message
 
 Examples:
   meshferry 3000
@@ -267,6 +280,53 @@ Examples:
 `);
 }
 
+function createCliReporter(agentConfig: AgentConfig, configPath?: string, profileName?: string): AgentReporter {
+  let introPrinted = false;
+  let tunnelReady = false;
+  let configPrinted = false;
+
+  return {
+    onConnecting() {
+      if (!introPrinted) {
+        console.log("Connecting to MeshFerry...");
+        console.log(`Linked to your local ${formatLocalTarget(agentConfig.local)}`);
+        introPrinted = true;
+      }
+
+      if (configPath && !configPrinted) {
+        console.log(`Using config: ${configPath}`);
+        if (profileName) {
+          console.log(`Using profile: ${profileName}`);
+        }
+        configPrinted = true;
+      }
+    },
+    onRegistered(message, context) {
+      tunnelReady = true;
+      if (context.reconnected) {
+        console.log(`Tunnel restored: ${message.publicUrl}`);
+        return;
+      }
+
+      console.log(`Tunnel ready: ${message.publicUrl}`);
+      console.log("Keep this running to keep your tunnel active.");
+    },
+    onServerError(message) {
+      console.error(formatCliError(message));
+    },
+    onRequestHandlingError(error) {
+      console.error(`Proxy error: ${formatErrorMessage(error)}`);
+    },
+    onDisconnected(event) {
+      if (!event.willReconnect) {
+        return;
+      }
+
+      console.log(tunnelReady ? "Connection lost. Reconnecting..." : "Still trying to connect...");
+    }
+  };
+}
+
 function isLocalServer(server: string): boolean {
   try {
     const url = new URL(server);
@@ -274,5 +334,47 @@ function isLocalServer(server: string): boolean {
     return host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "0.0.0.0";
   } catch {
     return false;
+  }
+}
+
+function formatLocalTarget(target: string): string {
+  try {
+    const url = new URL(target);
+    if (isLoopbackHost(url.hostname) && url.port) {
+      return `port ${url.port}`;
+    }
+
+    return `target ${target}`;
+  } catch {
+    return `target ${target}`;
+  }
+}
+
+function isLoopbackHost(host: string): boolean {
+  const value = host.toLowerCase();
+  return value === "localhost" || value === "127.0.0.1" || value === "0.0.0.0";
+}
+
+function formatCliError(message: string): string {
+  if (message === "Invalid token.") {
+    return "Authentication failed. Check your token and try again.";
+  }
+
+  return `Error: ${message}`;
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Unhandled MeshFerry error.";
+}
+
+function readVersion(): string {
+  try {
+    const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+      version?: string;
+    };
+
+    return packageJson.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
   }
 }

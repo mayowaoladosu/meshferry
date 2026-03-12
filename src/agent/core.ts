@@ -7,6 +7,7 @@ import {
   sanitizeOutgoingResponseHeaders,
   type ProxyRequestMessage,
   type ProxyResponseMessage,
+  type RegisteredMessage,
   type ServerMessage
 } from "../protocol.js";
 
@@ -15,6 +16,18 @@ export interface AgentConfig {
   local: string;
   subdomain: string;
   token: string;
+}
+
+export interface AgentReporter {
+  onConnecting?: (agentConfig: AgentConfig) => void;
+  onOpen?: (agentConfig: AgentConfig) => void;
+  onRegistered?: (message: RegisteredMessage, context: { reconnected: boolean; agentConfig: AgentConfig }) => void;
+  onServerError?: (message: string) => void;
+  onRequestHandlingError?: (error: unknown) => void;
+  onDisconnected?: (event: { code: number; reason: string; willReconnect: boolean; agentConfig: AgentConfig }) => void;
+  onTransportError?: (message: string) => void;
+  onReconnecting?: (agentConfig: AgentConfig) => void;
+  onHeartbeatTimeout?: (agentConfig: AgentConfig) => void;
 }
 
 const HEARTBEAT_INTERVAL_MS = parseNumber(process.env.MESHFERRY_HEARTBEAT_INTERVAL_MS, 15_000);
@@ -41,7 +54,12 @@ export function createAgentConfig(input: Partial<AgentConfig> & { localTarget?: 
 }
 
 export async function runAgent(agentConfig: AgentConfig): Promise<number> {
+  return runAgentWithReporter(agentConfig, createDefaultReporter());
+}
+
+export async function runAgentWithReporter(agentConfig: AgentConfig, reporter: AgentReporter): Promise<number> {
   let exitCode = 0;
+  const sessionState = { hasRegistered: false };
   shuttingDown = false;
   activeSocket = null;
 
@@ -55,23 +73,23 @@ export async function runAgent(agentConfig: AgentConfig): Promise<number> {
 
   try {
     while (!shuttingDown) {
+      reporter.onConnecting?.(agentConfig);
       const ws = new WebSocket(buildControlUrl(agentConfig));
       activeSocket = ws;
 
       const closeCode = await new Promise<number>((resolve) => {
-        const stopHeartbeat = startHeartbeat(ws);
+        const stopHeartbeat = startHeartbeat(ws, reporter, agentConfig);
 
         ws.on("open", () => {
-          console.log(`[meshferry-agent] connected to ${agentConfig.server}`);
-          console.log(`[meshferry-agent] local target: ${agentConfig.local}`);
+          reporter.onOpen?.(agentConfig);
         });
 
         ws.on("message", async (raw: RawData) => {
           try {
-            await handleMessage(ws, agentConfig, raw);
+            await handleMessage(ws, agentConfig, raw, reporter, sessionState);
           } catch (error) {
+            reporter.onRequestHandlingError?.(error);
             const message = error instanceof Error ? error.message : "Unhandled agent error.";
-            console.error("[meshferry-agent] request handling failed:", error);
             sendJson(ws, {
               type: "error",
               message
@@ -82,15 +100,19 @@ export async function runAgent(agentConfig: AgentConfig): Promise<number> {
         ws.on("close", (code: number, reason: Buffer) => {
           stopHeartbeat();
           activeSocket = null;
-          if (!shuttingDown) {
-            console.log(`[meshferry-agent] disconnected (${code}) ${reason.toString()}`);
-          }
+          const reasonText = reason.toString();
+          reporter.onDisconnected?.({
+            code,
+            reason: reasonText,
+            willReconnect: !shuttingDown && code !== 1000 && code < 4000,
+            agentConfig
+          });
 
           resolve(code);
         });
 
         ws.on("error", (error: Error) => {
-          console.error("[meshferry-agent] websocket error:", error.message);
+          reporter.onTransportError?.(error.message);
         });
       });
 
@@ -104,7 +126,7 @@ export async function runAgent(agentConfig: AgentConfig): Promise<number> {
       }
 
       await delay(2_000);
-      console.log("[meshferry-agent] reconnecting...");
+      reporter.onReconnecting?.(agentConfig);
     }
   } finally {
     process.off("SIGINT", handleSignal);
@@ -141,19 +163,25 @@ function readLocalTarget(value: string | number | undefined): string | undefined
   return `${value}`;
 }
 
-async function handleMessage(ws: WebSocket, agentConfig: AgentConfig, raw: RawData): Promise<void> {
+async function handleMessage(
+  ws: WebSocket,
+  agentConfig: AgentConfig,
+  raw: RawData,
+  reporter: AgentReporter,
+  sessionState: { hasRegistered: boolean }
+): Promise<void> {
   const message = readJsonMessage(raw as Buffer) as ServerMessage;
 
   if (message.type === "registered") {
+    const reconnected = sessionState.hasRegistered;
+    sessionState.hasRegistered = true;
     agentConfig.subdomain = message.subdomain;
-    console.log("[meshferry-agent] tunnel ready");
-    console.log(`[meshferry-agent] subdomain route: ${message.publicUrl}`);
-    console.log(`[meshferry-agent] path route: ${message.pathUrl}`);
+    reporter.onRegistered?.(message, { reconnected, agentConfig });
     return;
   }
 
   if (message.type === "error") {
-    console.error(`[meshferry-agent] server error: ${message.message}`);
+    reporter.onServerError?.(message.message);
     return;
   }
 
@@ -246,7 +274,7 @@ function buildControlUrl(agentConfig: AgentConfig): string {
   return url.toString();
 }
 
-function startHeartbeat(ws: WebSocket): () => void {
+function startHeartbeat(ws: WebSocket, reporter: AgentReporter, agentConfig: AgentConfig): () => void {
   let lastHeartbeatAt = Date.now();
   const noteHeartbeat = () => {
     lastHeartbeatAt = Date.now();
@@ -263,7 +291,7 @@ function startHeartbeat(ws: WebSocket): () => void {
     }
 
     if (Date.now() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
-      console.error("[meshferry-agent] heartbeat timed out, reconnecting...");
+      reporter.onHeartbeatTimeout?.(agentConfig);
       ws.terminate();
       clearInterval(timer);
       return;
@@ -300,4 +328,40 @@ function sendJson(ws: WebSocket, payload: unknown): void {
 function parseNumber(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function createDefaultReporter(): AgentReporter {
+  return {
+    onOpen(agentConfig) {
+      console.log(`[meshferry-agent] connected to ${agentConfig.server}`);
+      console.log(`[meshferry-agent] local target: ${agentConfig.local}`);
+    },
+    onRegistered(message) {
+      console.log("[meshferry-agent] tunnel ready");
+      console.log(`[meshferry-agent] subdomain route: ${message.publicUrl}`);
+      console.log(`[meshferry-agent] path route: ${message.pathUrl}`);
+    },
+    onServerError(message) {
+      console.error(`[meshferry-agent] server error: ${message}`);
+    },
+    onRequestHandlingError(error) {
+      console.error("[meshferry-agent] request handling failed:", error);
+    },
+    onDisconnected({ code, reason }) {
+      if (shuttingDown) {
+        return;
+      }
+
+      console.log(`[meshferry-agent] disconnected (${code}) ${reason}`);
+    },
+    onTransportError(message) {
+      console.error("[meshferry-agent] websocket error:", message);
+    },
+    onReconnecting() {
+      console.log("[meshferry-agent] reconnecting...");
+    },
+    onHeartbeatTimeout() {
+      console.error("[meshferry-agent] heartbeat timed out, reconnecting...");
+    }
+  };
 }
