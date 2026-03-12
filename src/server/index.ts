@@ -19,6 +19,7 @@ import { generateReadableSubdomain } from "./name-generator.js";
 const CONTROL_PORT = parseNumber(process.env.MESHFERRY_CONTROL_PORT ?? process.env.PORT, 7000);
 const EDGE_PORT = parseNumber(process.env.MESHFERRY_EDGE_PORT, 8080);
 const PUBLIC_HOST = process.env.MESHFERRY_PUBLIC_HOST ?? "meshferry.localhost";
+const CONTROL_PUBLIC_HOST = process.env.MESHFERRY_CONTROL_HOST ?? inferControlPublicHost(PUBLIC_HOST);
 const PUBLIC_SCHEME = process.env.MESHFERRY_PUBLIC_SCHEME ?? inferPublicScheme(PUBLIC_HOST);
 const PUBLIC_PORT = parseOptionalNumber(process.env.MESHFERRY_PUBLIC_PORT) ?? inferPublicPort(PUBLIC_HOST, EDGE_PORT, PUBLIC_SCHEME);
 const REQUEST_TIMEOUT_MS = parseNumber(process.env.MESHFERRY_REQUEST_TIMEOUT_MS, 30_000);
@@ -34,6 +35,7 @@ const AUTH_TOKENS = new Set(
     .map((value) => value.trim())
     .filter(Boolean)
 );
+const SINGLE_PORT_MODE = CONTROL_PORT === EDGE_PORT;
 
 interface PendingRequest {
   resolve: (message: ProxyResponseMessage) => void;
@@ -123,6 +125,36 @@ class TunnelSession {
 const tunnels = new Map<string, TunnelSession>();
 
 const controlServer = createServer((req, res) => {
+  if (SINGLE_PORT_MODE) {
+    void handleSinglePortRequest(req, res);
+    return;
+  }
+
+  if (handleControlRequest(req, res)) {
+    return;
+  }
+
+  json(res, 404, {
+    error: "Not found.",
+    endpoints: ["/health", "/api/tunnels"]
+  });
+});
+
+async function handleSinglePortRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    if (handleControlRequest(req, res)) {
+      return;
+    }
+
+    await handleEdgeRequest(req, res);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unhandled server error.";
+    console.error("[meshferry] single-port error:", error);
+    json(res, 500, { error: message });
+  }
+}
+
+function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolean {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `127.0.0.1:${CONTROL_PORT}`}`);
 
   if (url.pathname === "/health") {
@@ -132,7 +164,7 @@ const controlServer = createServer((req, res) => {
       edgePort: EDGE_PORT,
       connectedTunnels: tunnels.size
     });
-    return;
+    return true;
   }
 
   if (url.pathname === "/api/tunnels") {
@@ -148,14 +180,11 @@ const controlServer = createServer((req, res) => {
       .sort((left, right) => left.subdomain.localeCompare(right.subdomain));
 
     json(res, 200, { tunnels: data });
-    return;
+    return true;
   }
 
-  json(res, 404, {
-    error: "Not found.",
-    endpoints: ["/health", "/api/tunnels"]
-  });
-});
+  return false;
+}
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -220,7 +249,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   }
 
   const publicUrl = `${buildBaseUrl(subdomain ? `${subdomain}.${PUBLIC_HOST}` : PUBLIC_HOST)}`;
-  const pathUrl = `${buildBaseUrl(PUBLIC_HOST)}/t/${subdomain}`;
+  const pathUrl = `${buildBaseUrl(CONTROL_PUBLIC_HOST)}/t/${subdomain}`;
   const session = new TunnelSession(subdomain, ws, publicUrl, pathUrl);
 
   tunnels.set(subdomain, session);
@@ -262,30 +291,39 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   });
 });
 
-const edgeServer = createServer(async (req, res) => {
-  try {
-    await handleEdgeRequest(req, res);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unhandled edge error.";
-    console.error("[meshferry] edge error:", error);
-    json(res, 500, { error: message });
-  }
-});
+const edgeServer = SINGLE_PORT_MODE
+  ? null
+  : createServer(async (req, res) => {
+      try {
+        await handleEdgeRequest(req, res);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unhandled edge error.";
+        console.error("[meshferry] edge error:", error);
+        json(res, 500, { error: message });
+      }
+    });
 
 controlServer.listen(CONTROL_PORT, "0.0.0.0", () => {
+  if (SINGLE_PORT_MODE) {
+    console.log(`[meshferry] unified control and edge plane listening on http://127.0.0.1:${CONTROL_PORT}`);
+    return;
+  }
+
   console.log(`[meshferry] control plane listening on http://127.0.0.1:${CONTROL_PORT}`);
 });
 
-edgeServer.listen(EDGE_PORT, "0.0.0.0", () => {
-  console.log(`[meshferry] edge plane listening on http://127.0.0.1:${EDGE_PORT}`);
-});
+if (edgeServer) {
+  edgeServer.listen(EDGE_PORT, "0.0.0.0", () => {
+    console.log(`[meshferry] edge plane listening on http://127.0.0.1:${EDGE_PORT}`);
+  });
+}
 
 async function handleEdgeRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const route = resolveRoute(req);
   if (!route) {
     json(res, 404, {
       error: "No tunnel route matched this request.",
-      examplePathRoute: `${buildBaseUrl(PUBLIC_HOST)}/t/demo/`,
+      examplePathRoute: `${buildBaseUrl(CONTROL_PUBLIC_HOST)}/t/demo/`,
       exampleHostRoute: `${buildBaseUrl(`demo.${PUBLIC_HOST}`)}/`
     });
     return;
@@ -300,7 +338,7 @@ async function handleEdgeRequest(req: IncomingMessage, res: ServerResponse): Pro
   const body = await readBody(req);
   const headers = sanitizeIncomingRequestHeaders(req.headers);
   headers["x-forwarded-host"] = req.headers.host ?? "";
-  headers["x-forwarded-proto"] = "http";
+  headers["x-forwarded-proto"] = PUBLIC_SCHEME;
   headers["x-meshferry-subdomain"] = route.subdomain;
 
   const message: ProxyRequestMessage = {
@@ -399,6 +437,10 @@ function parseOptionalNumber(value: string | undefined): number | null {
 
 function inferPublicScheme(host: string): string {
   return isLocalDevelopmentHost(host) ? "http" : "https";
+}
+
+function inferControlPublicHost(host: string): string {
+  return isLocalDevelopmentHost(host) ? host : `connect.${host}`;
 }
 
 function inferPublicPort(host: string, edgePort: number, scheme: string): number | null {

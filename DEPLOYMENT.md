@@ -118,18 +118,18 @@ That maps cleanly to Railway's public networking and custom domains.
 
 ### Recommended first Railway layout
 
-Use one Railway service for now with two public domains:
+Use one Railway service with one wildcard custom domain:
 
-- `connect.meshferry.tech` -> target port `7000`
-- `*.meshferry.tech` -> target port `8080`
+- `*.meshferry.tech` -> target port `7000`
 
-That is enough for:
+In this mode MeshFerry runs the control plane and edge plane on the same public port.
 
-- CLI agent connections on `https://connect.meshferry.tech/connect`
-- control-plane health and tunnel APIs on `https://connect.meshferry.tech`
-- public tunnel URLs like `https://quick-harbor.meshferry.tech`
+That single wildcard domain covers:
 
-Do not add `api.meshferry.tech` yet unless you want a separate domain for the same control-plane service. The current code already serves the API on the control-plane port, so `connect.meshferry.tech` is enough for now.
+- `connect.meshferry.tech` for CLI agent connections and control-plane APIs
+- generated tunnel hosts like `quick-harbor.meshferry.tech`
+
+This is the right setup if your Railway plan only supports one custom domain per service.
 
 ### Cloudflare + Railway notes
 
@@ -164,10 +164,9 @@ PORT=7000
 
 There is a ready-to-copy example file in `.env.railway.example`.
 
-4. In Railway networking, add `connect.meshferry.tech` and select target port `7000`.
-5. In Railway networking, add `*.meshferry.tech` and select target port `8080`.
-6. Create the DNS records in Cloudflare exactly as Railway instructs.
-7. For the wildcard domain, add both CNAMEs Railway gives you:
+4. In Railway networking, add `*.meshferry.tech` and select target port `7000`.
+5. Create the DNS records in Cloudflare exactly as Railway instructs.
+6. For the wildcard domain, add both CNAMEs Railway gives you:
    - the wildcard CNAME
    - the `_acme-challenge` CNAME
 
@@ -179,7 +178,7 @@ Railway docs say:
 - Hobby plan: 2 custom domains per service
 - Pro plan: 20 custom domains per service by default
 
-That means the two-domain setup above fits Hobby. If you later want `app.meshferry.tech`, `api.meshferry.tech`, `meshferry.tech`, and `www.meshferry.tech` all on the same service, you will likely want Pro or separate services.
+That means the single-wildcard setup above fits Trial. If you later want `app.meshferry.tech`, `api.meshferry.tech`, `meshferry.tech`, and `www.meshferry.tech` as explicit extra custom domains, you will need a higher plan or separate services.
 
 ### When Railway stops being ideal
 

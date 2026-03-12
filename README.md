@@ -203,5 +203,5 @@ src/
 - MIT license
 - CI workflows in `.github/workflows`
 - production compose and Caddy files for `meshferry.tech`
-- Railway can host the current HTTP/WebSocket version with `connect.meshferry.tech` and `*.meshferry.tech`
+- Railway can host the current HTTP/WebSocket version even on a one-domain plan by using only `*.meshferry.tech`
 - Railway config-as-code is in `railway.toml`
