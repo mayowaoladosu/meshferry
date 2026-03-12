@@ -152,6 +152,9 @@ async function handleStatusCommand(args: string[]): Promise<void> {
       publicUrl: string;
       pathUrl: string;
       connectedAt: string;
+      status?: "connected" | "disconnected";
+      disconnectedAt?: string | null;
+      leaseExpiresAt?: string | null;
       requestCount?: number;
       lastRequestAt?: string | null;
     }>;
@@ -174,11 +177,19 @@ async function handleStatusCommand(args: string[]): Promise<void> {
   for (const tunnel of tunnels) {
     const requestCount = tunnel.requestCount ?? 0;
     const lastSeen = tunnel.lastRequestAt ?? "never";
+    const status = tunnel.status ?? "connected";
     console.log("");
     console.log(`- ${tunnel.subdomain}`);
     console.log(`  public: ${tunnel.publicUrl}`);
     console.log(`  path: ${tunnel.pathUrl}`);
+    console.log(`  status: ${status}`);
     console.log(`  connected: ${tunnel.connectedAt}`);
+    if (tunnel.disconnectedAt) {
+      console.log(`  disconnected: ${tunnel.disconnectedAt}`);
+    }
+    if (tunnel.leaseExpiresAt) {
+      console.log(`  reconnect by: ${tunnel.leaseExpiresAt}`);
+    }
     console.log(`  requests: ${requestCount}`);
     console.log(`  last request: ${lastSeen}`);
   }

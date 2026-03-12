@@ -17,6 +17,9 @@ export interface AgentConfig {
   token: string;
 }
 
+const HEARTBEAT_INTERVAL_MS = parseNumber(process.env.MESHFERRY_HEARTBEAT_INTERVAL_MS, 15_000);
+const HEARTBEAT_TIMEOUT_MS = parseNumber(process.env.MESHFERRY_HEARTBEAT_TIMEOUT_MS, 45_000);
+
 let shuttingDown = false;
 let activeSocket: WebSocket | null = null;
 
@@ -56,6 +59,8 @@ export async function runAgent(agentConfig: AgentConfig): Promise<number> {
       activeSocket = ws;
 
       const closeCode = await new Promise<number>((resolve) => {
+        const stopHeartbeat = startHeartbeat(ws);
+
         ws.on("open", () => {
           console.log(`[meshferry-agent] connected to ${agentConfig.server}`);
           console.log(`[meshferry-agent] local target: ${agentConfig.local}`);
@@ -75,6 +80,7 @@ export async function runAgent(agentConfig: AgentConfig): Promise<number> {
         });
 
         ws.on("close", (code: number, reason: Buffer) => {
+          stopHeartbeat();
           activeSocket = null;
           if (!shuttingDown) {
             console.log(`[meshferry-agent] disconnected (${code}) ${reason.toString()}`);
@@ -139,6 +145,7 @@ async function handleMessage(ws: WebSocket, agentConfig: AgentConfig, raw: RawDa
   const message = readJsonMessage(raw as Buffer) as ServerMessage;
 
   if (message.type === "registered") {
+    agentConfig.subdomain = message.subdomain;
     console.log("[meshferry-agent] tunnel ready");
     console.log(`[meshferry-agent] subdomain route: ${message.publicUrl}`);
     console.log(`[meshferry-agent] path route: ${message.pathUrl}`);
@@ -239,6 +246,41 @@ function buildControlUrl(agentConfig: AgentConfig): string {
   return url.toString();
 }
 
+function startHeartbeat(ws: WebSocket): () => void {
+  let lastHeartbeatAt = Date.now();
+  const noteHeartbeat = () => {
+    lastHeartbeatAt = Date.now();
+  };
+
+  ws.on("ping", noteHeartbeat);
+  ws.on("pong", noteHeartbeat);
+  ws.on("message", noteHeartbeat);
+
+  const timer = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) {
+      clearInterval(timer);
+      return;
+    }
+
+    if (Date.now() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
+      console.error("[meshferry-agent] heartbeat timed out, reconnecting...");
+      ws.terminate();
+      clearInterval(timer);
+      return;
+    }
+
+    try {
+      ws.ping();
+    } catch {
+      ws.terminate();
+      clearInterval(timer);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 function ensureTrailingSlash(url: string): string {
   return url.endsWith("/") ? url : `${url}/`;
 }
@@ -253,4 +295,9 @@ function sendJson(ws: WebSocket, payload: unknown): void {
   }
 
   ws.send(JSON.stringify(payload));
+}
+
+function parseNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }

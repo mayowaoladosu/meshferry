@@ -11,6 +11,40 @@ const token = "meshferry-dev-token";
 const subdomain = "demo";
 const processes = [];
 
+function startServer() {
+  return spawn("node", ["dist/server/index.js"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MESHFERRY_CONTROL_PORT: `${controlPort}`,
+      MESHFERRY_EDGE_PORT: `${edgePort}`,
+      MESHFERRY_AUTH_TOKENS: token,
+      MESHFERRY_TUNNEL_GRACE_MS: "8000"
+    },
+    stdio: "inherit"
+  });
+}
+
+function startAgent() {
+  return spawn(
+    "node",
+    [
+      "dist/cli/index.js",
+      `${backendPort}`,
+      "--subdomain",
+      subdomain,
+      "--server",
+      `http://127.0.0.1:${controlPort}`,
+      "--token",
+      token
+    ],
+    {
+      cwd: root,
+      stdio: "inherit"
+    }
+  );
+}
+
 const backend = createServer(async (req, res) => {
   if (req.url === "/style.css") {
     const css = "body{background:#102030;color:#f5efe4}";
@@ -49,34 +83,12 @@ const backend = createServer(async (req, res) => {
 try {
   await new Promise((resolve) => backend.listen(backendPort, "127.0.0.1", resolve));
 
-  processes.push(
-    spawn("node", ["dist/server/index.js"], {
-      cwd: root,
-      stdio: "inherit"
-    })
-  );
+  processes.push(startServer());
 
   await delay(2_000);
 
-  processes.push(
-    spawn(
-      "node",
-      [
-        "dist/cli/index.js",
-        `${backendPort}`,
-        "--subdomain",
-        subdomain,
-        "--server",
-        `http://127.0.0.1:${controlPort}`,
-        "--token",
-        token
-      ],
-      {
-        cwd: root,
-        stdio: "inherit"
-      }
-    )
-  );
+  const firstAgent = startAgent();
+  processes.push(firstAgent);
 
   await delay(3_000);
 
@@ -95,6 +107,19 @@ try {
     }
   );
 
+  firstAgent.kill();
+  await delay(1_000);
+
+  const disconnectedResponse = await fetch(`http://${subdomain}.meshferry.localhost:${edgePort}/during-disconnect`);
+  const disconnectedBody = await disconnectedResponse.json();
+
+  const secondAgent = startAgent();
+  processes.push(secondAgent);
+
+  await delay(3_000);
+
+  const resumedResponse = await fetch(`http://${subdomain}.meshferry.localhost:${edgePort}/after-reconnect`);
+
   if (status.status !== 0) {
     throw new Error(status.stderr || status.stdout || "Status command failed.");
   }
@@ -105,7 +130,11 @@ try {
     edgeBody: await edgeResponse.json(),
     assetStatus: assetResponse.status,
     assetEncoding: assetResponse.headers.get("content-encoding"),
-    assetBody: await assetResponse.text()
+    assetBody: await assetResponse.text(),
+    disconnectedStatus: disconnectedResponse.status,
+    disconnectedBody,
+    resumedStatus: resumedResponse.status,
+    resumedBody: await resumedResponse.json()
   };
 
   if (result.assetBody !== "body{background:#102030;color:#f5efe4}") {
@@ -114,6 +143,18 @@ try {
 
   if (result.assetEncoding !== null) {
     throw new Error(`Compressed asset proxying leaked content-encoding=${result.assetEncoding}.`);
+  }
+
+  if (result.disconnectedStatus !== 503) {
+    throw new Error(`Expected a 503 during disconnect, received ${result.disconnectedStatus}.`);
+  }
+
+  if (!String(result.disconnectedBody.error ?? "").includes("temporarily disconnected")) {
+    throw new Error(`Unexpected disconnect response: ${JSON.stringify(result.disconnectedBody)}`);
+  }
+
+  if (result.resumedStatus !== 200) {
+    throw new Error(`Expected tunnel to resume after reconnect, received ${result.resumedStatus}.`);
   }
 
   console.log(JSON.stringify(result, null, 2));

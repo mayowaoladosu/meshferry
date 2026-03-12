@@ -102,6 +102,8 @@ If you want raw JSON:
 meshferry status --json
 ```
 
+MeshFerry now keeps a disconnected tunnel leased for `5` minutes by default. During that window the public URL stays reserved, requests return `503` instead of `404`, and the agent will reclaim the same subdomain on reconnect.
+
 For a production-style generated public URL:
 
 ```bash
@@ -163,6 +165,9 @@ Server environment variables:
 - `MESHFERRY_PUBLIC_SCHEME`: scheme used in generated public URLs, default `http` for localhost and `https` otherwise
 - `MESHFERRY_PUBLIC_PORT`: optional public port override for generated URLs
 - `MESHFERRY_REQUEST_TIMEOUT_MS`: upstream timeout, default `30000`
+- `MESHFERRY_TUNNEL_GRACE_MS`: how long to keep a disconnected tunnel URL reserved, default `300000`
+- `MESHFERRY_HEARTBEAT_INTERVAL_MS`: WebSocket heartbeat interval, default `15000`
+- `MESHFERRY_HEARTBEAT_TIMEOUT_MS`: WebSocket heartbeat timeout, default `45000`
 
 Agent environment variables:
 

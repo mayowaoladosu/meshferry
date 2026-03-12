@@ -23,6 +23,9 @@ const CONTROL_PUBLIC_HOST = process.env.MESHFERRY_CONTROL_HOST ?? inferControlPu
 const PUBLIC_SCHEME = process.env.MESHFERRY_PUBLIC_SCHEME ?? inferPublicScheme(PUBLIC_HOST);
 const PUBLIC_PORT = parseOptionalNumber(process.env.MESHFERRY_PUBLIC_PORT) ?? inferPublicPort(PUBLIC_HOST, EDGE_PORT, PUBLIC_SCHEME);
 const REQUEST_TIMEOUT_MS = parseNumber(process.env.MESHFERRY_REQUEST_TIMEOUT_MS, 30_000);
+const TUNNEL_GRACE_MS = parseNumber(process.env.MESHFERRY_TUNNEL_GRACE_MS, 300_000);
+const HEARTBEAT_INTERVAL_MS = parseNumber(process.env.MESHFERRY_HEARTBEAT_INTERVAL_MS, 15_000);
+const HEARTBEAT_TIMEOUT_MS = parseNumber(process.env.MESHFERRY_HEARTBEAT_TIMEOUT_MS, 45_000);
 const RESERVED_SUBDOMAINS = new Set(
   (process.env.MESHFERRY_RESERVED_SUBDOMAINS ?? "app,api,connect,www,admin,status")
     .split(",")
@@ -48,6 +51,9 @@ interface TunnelInfo {
   connectedAt: string;
   publicUrl: string;
   pathUrl: string;
+  status: "connected" | "disconnected";
+  disconnectedAt: string | null;
+  leaseExpiresAt: string | null;
   requestCount: number;
   lastRequestAt: string | null;
 }
@@ -57,19 +63,34 @@ class TunnelSession {
   readonly connectedAt = new Date();
   requestCount = 0;
   lastRequestAt: Date | null = null;
+  ws: WebSocket | null = null;
+  disconnectedAt: Date | null = null;
+  leaseExpiresAt: Date | null = null;
+  private graceTimer: NodeJS.Timeout | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastHeartbeatAt = Date.now();
 
   constructor(
     readonly subdomain: string,
-    readonly ws: WebSocket,
+    readonly token: string,
     readonly publicUrl: string,
     readonly pathUrl: string
   ) {}
 
+  get isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN && this.disconnectedAt === null;
+  }
+
+  get isReconnectable(): boolean {
+    return this.disconnectedAt !== null && this.leaseExpiresAt !== null && this.leaseExpiresAt.getTime() > Date.now();
+  }
+
   async forwardRequest(message: ProxyRequestMessage): Promise<ProxyResponseMessage> {
-    if (this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Tunnel is not connected.");
     }
 
+    const socket = this.ws;
     this.requestCount += 1;
     this.lastRequestAt = new Date();
 
@@ -80,7 +101,7 @@ class TunnelSession {
       }, REQUEST_TIMEOUT_MS);
 
       this.pending.set(message.requestId, { resolve, reject, timer });
-      this.ws.send(JSON.stringify(message), (error?: Error) => {
+      socket.send(JSON.stringify(message), (error?: Error) => {
         if (!error) {
           return;
         }
@@ -92,7 +113,21 @@ class TunnelSession {
     });
   }
 
+  attachSocket(ws: WebSocket): void {
+    this.clearGraceTimer();
+    this.clearHeartbeat();
+    this.ws = ws;
+    this.disconnectedAt = null;
+    this.leaseExpiresAt = null;
+    this.noteHeartbeat();
+  }
+
+  canReconnect(token: string): boolean {
+    return this.token === token && this.isReconnectable;
+  }
+
   handleMessage(raw: RawData): void {
+    this.noteHeartbeat();
     const message = readJsonMessage(raw as Buffer) as ClientMessage;
 
     if (message.type === "proxy-response") {
@@ -112,13 +147,108 @@ class TunnelSession {
     }
   }
 
-  close(reason: string): void {
+  noteHeartbeat(): void {
+    this.lastHeartbeatAt = Date.now();
+  }
+
+  startHeartbeat(onTimeout: () => void): void {
+    this.clearHeartbeat();
+
+    this.heartbeatTimer = setInterval(() => {
+      const socket = this.ws;
+      if (!socket) {
+        this.clearHeartbeat();
+        return;
+      }
+
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      if (Date.now() - this.lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
+        console.warn(`[meshferry] heartbeat timed out for ${this.subdomain}`);
+        socket.terminate();
+        onTimeout();
+        return;
+      }
+
+      try {
+        socket.ping();
+      } catch {
+        socket.terminate();
+        onTimeout();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    this.heartbeatTimer.unref?.();
+  }
+
+  beginGracePeriod(reason: string, onExpire: () => void): void {
+    if (this.disconnectedAt) {
+      return;
+    }
+
+    this.closePending(reason);
+    this.clearHeartbeat();
+    this.ws = null;
+
+    if (TUNNEL_GRACE_MS <= 0) {
+      onExpire();
+      return;
+    }
+
+    const disconnectedAt = new Date();
+    this.disconnectedAt = disconnectedAt;
+    this.leaseExpiresAt = new Date(disconnectedAt.getTime() + TUNNEL_GRACE_MS);
+    this.graceTimer = setTimeout(() => {
+      this.graceTimer = null;
+      onExpire();
+    }, TUNNEL_GRACE_MS);
+    this.graceTimer.unref?.();
+  }
+
+  release(reason: string): void {
+    this.clearGraceTimer();
+    this.clearHeartbeat();
+    this.closePending(reason);
+    this.ws = null;
+    this.disconnectedAt = null;
+    this.leaseExpiresAt = null;
+  }
+
+  retryAfterSeconds(): number | null {
+    if (!this.leaseExpiresAt) {
+      return null;
+    }
+
+    return Math.max(1, Math.ceil((this.leaseExpiresAt.getTime() - Date.now()) / 1_000));
+  }
+
+  private closePending(reason: string): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error(reason));
     }
 
     this.pending.clear();
+  }
+
+  private clearGraceTimer(): void {
+    if (!this.graceTimer) {
+      return;
+    }
+
+    clearTimeout(this.graceTimer);
+    this.graceTimer = null;
+  }
+
+  private clearHeartbeat(): void {
+    if (!this.heartbeatTimer) {
+      return;
+    }
+
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 }
 
@@ -162,7 +292,9 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
       ok: true,
       controlPort: CONTROL_PORT,
       edgePort: EDGE_PORT,
-      connectedTunnels: tunnels.size
+      connectedTunnels: Array.from(tunnels.values()).filter((session) => session.isConnected).length,
+      reconnectableTunnels: Array.from(tunnels.values()).filter((session) => session.isReconnectable).length,
+      tunnelGraceMs: TUNNEL_GRACE_MS
     });
     return true;
   }
@@ -174,6 +306,9 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
         connectedAt: session.connectedAt.toISOString(),
         publicUrl: session.publicUrl,
         pathUrl: session.pathUrl,
+        status: session.isConnected ? ("connected" as const) : ("disconnected" as const),
+        disconnectedAt: session.disconnectedAt?.toISOString() ?? null,
+        leaseExpiresAt: session.leaseExpiresAt?.toISOString() ?? null,
         requestCount: session.requestCount,
         lastRequestAt: session.lastRequestAt?.toISOString() ?? null
       }))
@@ -237,7 +372,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
   const subdomain = requestedSubdomain || generateUniqueSubdomain();
 
-  if (tunnels.has(subdomain)) {
+  const existing = tunnels.get(subdomain);
+  if (existing?.isConnected) {
     ws.send(
       JSON.stringify({
         type: "error",
@@ -248,47 +384,43 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     return;
   }
 
-  const publicUrl = `${buildBaseUrl(subdomain ? `${subdomain}.${PUBLIC_HOST}` : PUBLIC_HOST)}`;
-  const pathUrl = `${buildBaseUrl(CONTROL_PUBLIC_HOST)}/t/${subdomain}`;
-  const session = new TunnelSession(subdomain, ws, publicUrl, pathUrl);
+  if (existing && !existing.canReconnect(token)) {
+    const leaseExpiresAt = existing.leaseExpiresAt?.toISOString();
+    const message = leaseExpiresAt
+      ? `The subdomain "${subdomain}" is reserved until ${leaseExpiresAt}.`
+      : `The subdomain "${subdomain}" is already in use.`;
+
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        message
+      })
+    );
+    ws.close(4005, "Subdomain reserved");
+    return;
+  }
+
+  const session =
+    existing ??
+    new TunnelSession(
+      subdomain,
+      token,
+      `${buildBaseUrl(subdomain ? `${subdomain}.${PUBLIC_HOST}` : PUBLIC_HOST)}`,
+      `${buildBaseUrl(CONTROL_PUBLIC_HOST)}/t/${subdomain}`
+    );
 
   tunnels.set(subdomain, session);
-  console.log(`[meshferry] connected ${subdomain} -> ${publicUrl}`);
+  attachSocketToSession(session, ws);
+  console.log(`[meshferry] ${existing ? "reconnected" : "connected"} ${subdomain} -> ${session.publicUrl}`);
 
   ws.send(
     JSON.stringify({
       type: "registered",
       subdomain,
-      publicUrl,
-      pathUrl
+      publicUrl: session.publicUrl,
+      pathUrl: session.pathUrl
     })
   );
-
-  ws.on("message", (raw: RawData) => {
-    try {
-      session.handleMessage(raw);
-    } catch (error) {
-      console.error(`[meshferry] failed to handle agent message for ${subdomain}:`, error);
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          message: "Malformed agent message."
-        })
-      );
-    }
-  });
-
-  ws.on("close", () => {
-    session.close("Tunnel disconnected.");
-    tunnels.delete(subdomain);
-    console.log(`[meshferry] disconnected ${subdomain}`);
-  });
-
-  ws.on("error", (error: Error) => {
-    session.close("Tunnel transport error.");
-    tunnels.delete(subdomain);
-    console.error(`[meshferry] websocket error for ${subdomain}:`, error);
-  });
 });
 
 const edgeServer = SINGLE_PORT_MODE
@@ -335,6 +467,19 @@ async function handleEdgeRequest(req: IncomingMessage, res: ServerResponse): Pro
     return;
   }
 
+  if (!session.isConnected) {
+    const retryAfter = session.retryAfterSeconds();
+    if (retryAfter !== null) {
+      res.setHeader("retry-after", retryAfter);
+    }
+
+    json(res, 503, {
+      error: `Tunnel "${route.subdomain}" is temporarily disconnected.`,
+      reconnectBy: session.leaseExpiresAt?.toISOString() ?? null
+    });
+    return;
+  }
+
   const body = await readBody(req);
   const headers = sanitizeIncomingRequestHeaders(req.headers);
   headers["x-forwarded-host"] = req.headers.host ?? "";
@@ -350,7 +495,26 @@ async function handleEdgeRequest(req: IncomingMessage, res: ServerResponse): Pro
     body: encodeBody(body)
   };
 
-  const response = await session.forwardRequest(message);
+  const response = await session.forwardRequest(message).catch((error) => {
+    if (!session.isConnected) {
+      const retryAfter = session.retryAfterSeconds();
+      if (retryAfter !== null) {
+        res.setHeader("retry-after", retryAfter);
+      }
+
+      json(res, 503, {
+        error: `Tunnel "${route.subdomain}" is temporarily disconnected.`,
+        reconnectBy: session.leaseExpiresAt?.toISOString() ?? null
+      });
+      return null;
+    }
+
+    throw error;
+  });
+  if (!response) {
+    return;
+  }
+
   const responseBody = decodeBody(response.body);
   const responseHeaders = sanitizeAgentResponseHeaders(response.headers);
 
@@ -461,6 +625,60 @@ function buildBaseUrl(host: string): string {
   return `${PUBLIC_SCHEME}://${host}${port}`;
 }
 
+function attachSocketToSession(session: TunnelSession, ws: WebSocket): void {
+  session.attachSocket(ws);
+  session.startHeartbeat(() => undefined);
+
+  ws.on("pong", () => {
+    session.noteHeartbeat();
+  });
+
+  ws.on("message", (raw: RawData) => {
+    try {
+      session.handleMessage(raw);
+    } catch (error) {
+      console.error(`[meshferry] failed to handle agent message for ${session.subdomain}:`, error);
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          message: "Malformed agent message."
+        })
+      );
+    }
+  });
+
+  ws.on("close", (_code: number, reason: Buffer) => {
+    if (session.ws !== ws) {
+      return;
+    }
+
+    const detail = reason.toString() || "Tunnel disconnected.";
+    session.beginGracePeriod(detail, () => releaseTunnel(session.subdomain, "Tunnel reconnect window expired."));
+    const retryAfter = session.retryAfterSeconds();
+    const retrySuffix = retryAfter !== null ? `; holding ${retryAfter}s for reconnect` : "";
+    console.log(`[meshferry] disconnected ${session.subdomain}${retrySuffix}`);
+  });
+
+  ws.on("error", (error: Error) => {
+    if (session.ws !== ws) {
+      return;
+    }
+
+    console.error(`[meshferry] websocket error for ${session.subdomain}:`, error);
+  });
+}
+
 function generateUniqueSubdomain(): string {
   return generateReadableSubdomain((candidate) => !tunnels.has(candidate) && !RESERVED_SUBDOMAINS.has(candidate));
+}
+
+function releaseTunnel(subdomain: string, reason: string): void {
+  const session = tunnels.get(subdomain);
+  if (!session) {
+    return;
+  }
+
+  session.release(reason);
+  tunnels.delete(subdomain);
+  console.log(`[meshferry] released ${subdomain}`);
 }
