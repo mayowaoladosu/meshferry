@@ -76,6 +76,7 @@ export async function runAgentWithReporter(agentConfig: AgentConfig, reporter: A
       reporter.onConnecting?.(agentConfig);
       const ws = new WebSocket(buildControlUrl(agentConfig));
       activeSocket = ws;
+      let fatalTransportMessage: string | null = null;
 
       const closeCode = await new Promise<number>((resolve) => {
         const stopHeartbeat = startHeartbeat(ws, reporter, agentConfig);
@@ -104,7 +105,7 @@ export async function runAgentWithReporter(agentConfig: AgentConfig, reporter: A
           reporter.onDisconnected?.({
             code,
             reason: reasonText,
-            willReconnect: !shuttingDown && code !== 1000 && code < 4000,
+            willReconnect: !shuttingDown && fatalTransportMessage === null && code !== 1000 && code < 4000,
             agentConfig
           });
 
@@ -112,9 +113,19 @@ export async function runAgentWithReporter(agentConfig: AgentConfig, reporter: A
         });
 
         ws.on("error", (error: Error) => {
-          reporter.onTransportError?.(error.message);
+          const message = formatTransportErrorMessage(error, agentConfig, sessionState.hasRegistered);
+          if (shouldFailFastOnTransportError(error, agentConfig, sessionState.hasRegistered)) {
+            fatalTransportMessage = message;
+          }
+
+          reporter.onTransportError?.(message);
         });
       });
+
+      if (fatalTransportMessage) {
+        exitCode = 1;
+        break;
+      }
 
       if (shuttingDown || closeCode === 1000) {
         break;
@@ -330,6 +341,32 @@ function parseNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function shouldFailFastOnTransportError(error: Error, agentConfig: AgentConfig, hasRegistered: boolean): boolean {
+  if (hasRegistered || !isLoopbackServer(agentConfig.server)) {
+    return false;
+  }
+
+  return error.message.toUpperCase().includes("ECONNREFUSED");
+}
+
+function formatTransportErrorMessage(error: Error, agentConfig: AgentConfig, hasRegistered: boolean): string {
+  if (shouldFailFastOnTransportError(error, agentConfig, hasRegistered)) {
+    return `Could not reach the MeshFerry server at ${agentConfig.server}. Start it with \`meshferry-server\` or pass \`--server <url>\`. (${error.message})`;
+  }
+
+  return error.message;
+}
+
+function isLoopbackServer(server: string): boolean {
+  try {
+    const url = new URL(server);
+    const host = url.hostname.toLowerCase();
+    return host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
+}
+
 function createDefaultReporter(): AgentReporter {
   return {
     onOpen(agentConfig) {
@@ -355,7 +392,7 @@ function createDefaultReporter(): AgentReporter {
       console.log(`[meshferry-agent] disconnected (${code}) ${reason}`);
     },
     onTransportError(message) {
-      console.error("[meshferry-agent] websocket error:", message);
+      console.error(`[meshferry-agent] ${message}`);
     },
     onReconnecting() {
       console.log("[meshferry-agent] reconnecting...");

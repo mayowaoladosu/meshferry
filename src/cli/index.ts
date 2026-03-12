@@ -144,7 +144,13 @@ async function handleStatusCommand(args: string[]): Promise<void> {
   const server = getStringFlag(parsed, "server") ?? loadedConfig?.config.server ?? process.env.MESHFERRY_SERVER ?? "http://127.0.0.1:7000";
   const apiUrl = new URL("/api/tunnels", server).toString();
 
-  const response = await fetch(apiUrl);
+  let response: Response;
+  try {
+    response = await fetch(apiUrl);
+  } catch (error) {
+    throw new Error(formatStatusRequestError(server, error));
+  }
+
   if (!response.ok) {
     throw new Error(`Status request failed with ${response.status} ${response.statusText}.`);
   }
@@ -260,7 +266,7 @@ Commands:
   meshferry help              Show this help message
 
 Options:
-  --server <url>              Control server URL
+  --server <url>              Control server URL (default http://127.0.0.1:7000)
   --local <target>            Local port or URL, used with up
   --subdomain <name>          Requested subdomain
   --random                    Let MeshFerry generate a public subdomain
@@ -284,6 +290,7 @@ function createCliReporter(agentConfig: AgentConfig, configPath?: string, profil
   let introPrinted = false;
   let tunnelReady = false;
   let configPrinted = false;
+  let lastTransportMessage: string | null = null;
 
   return {
     onConnecting() {
@@ -316,6 +323,14 @@ function createCliReporter(agentConfig: AgentConfig, configPath?: string, profil
     },
     onRequestHandlingError(error) {
       console.error(`Proxy error: ${formatErrorMessage(error)}`);
+    },
+    onTransportError(message) {
+      if (message === lastTransportMessage) {
+        return;
+      }
+
+      console.error(message);
+      lastTransportMessage = message;
     },
     onDisconnected(event) {
       if (!event.willReconnect) {
@@ -363,8 +378,26 @@ function formatCliError(message: string): string {
   return `Error: ${message}`;
 }
 
+function formatStatusRequestError(server: string, error: unknown): string {
+  const detail = formatErrorMessage(error);
+  if (isLocalServer(server) && detail.toUpperCase().includes("ECONNREFUSED")) {
+    return `Could not reach the MeshFerry server at ${server}. Start it with \`meshferry-server\` or pass \`--server <url>\`.`;
+  }
+
+  return `Could not fetch MeshFerry status from ${server}: ${detail}`;
+}
+
 function formatErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Unhandled MeshFerry error.";
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause;
+    if (cause instanceof Error && cause.message) {
+      return cause.message;
+    }
+
+    return error.message;
+  }
+
+  return "Unhandled MeshFerry error.";
 }
 
 function readVersion(): string {
