@@ -1,12 +1,30 @@
 services:
-  meshferry:
-    build: .
+  web:
+    build:
+      context: .
+      target: web
     environment:
-      MESHFERRY_AUTH_TOKENS: ${MESHFERRY_AUTH_TOKENS:-meshferry-dev-token}
-      MESHFERRY_CONTROL_PORT: 7000
-      MESHFERRY_EDGE_PORT: 8080
-      MESHFERRY_PUBLIC_HOST: ${MESHFERRY_PUBLIC_HOST:-localhost}
-      MESHFERRY_REQUEST_TIMEOUT_MS: 30000
+      PORT: "3000"
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_GATEWAY_URL: http://localhost:4040
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to your Neon pooled PostgreSQL connection string}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-5}
+      MESHFERRY_CONTROL_API_TOKEN: ${MESHFERRY_CONTROL_API_TOKEN:-dev-control-token}
+      MESHFERRY_ALLOW_DEV_AUTH: ${MESHFERRY_ALLOW_DEV_AUTH:-true}
     ports:
-      - "7000:7000"
-      - "8080:8080"
+      - "3000:3000"
+    command: sh -c "node apps/web/scripts/migrate.mjs && npm run start -w @meshferry/web"
+
+  gateway:
+    build:
+      context: .
+      target: gateway
+    depends_on:
+      - web
+    environment:
+      PORT: "4040"
+      MESHFERRY_EDGE_DOMAIN: localhost:4040
+      MESHFERRY_CONTROL_API_URL: http://web:3000
+      MESHFERRY_CONTROL_API_TOKEN: ${MESHFERRY_CONTROL_API_TOKEN:-dev-control-token}
+    ports:
+      - "4040:4040"

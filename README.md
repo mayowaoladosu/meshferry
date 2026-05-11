@@ -1,212 +1,91 @@
-# MeshFerry
+# Meshferry
 
-MeshFerry is an open source secure tunnel gateway for self-hosters and small teams. It lets you expose a local HTTP service through a public edge without opening inbound ports on the machine running your app.
+Meshferry is a self-hostable tunnel product in the same product category as ngrok and OutRay. It includes a Clerk-ready dashboard, terminal device linking, subdomain reservations, and a Node edge gateway that forwards HTTP, TCP, and UDP traffic over persistent agent WebSocket connections.
 
-This repo is the first usable release:
+## Apps
 
-- `meshferry-server` accepts agent connections and exposes public routes.
-- `meshferry` is the main CLI for opening tunnels and checking server status.
-- `meshferry-agent` still exists as a low-level compatibility entrypoint.
-- Routing works by subdomain or by a path fallback for local development.
+- `apps/web`: Next.js dashboard and control-plane API.
+- `apps/gateway`: public edge gateway for HTTP/TCP/UDP tunnels.
+- `apps/cli`: terminal agent used to connect devices and run tunnels.
+- `packages/core`: shared protocol schemas, subdomain validation, token helpers, and naming utilities.
 
-## Why this exists
-
-The goal is not to clone every part of ngrok. The goal is to ship a clean, understandable tunnel core that can grow into a broader traffic gateway later.
-
-## Current architecture
-
-```text
-local app <-> meshferry-agent <== websocket ==> meshferry-server <-> public HTTP client
-```
-
-The server runs two listeners:
-
-- control plane on `:7000` for agent WebSocket connections and tunnel inspection
-- edge plane on `:8080` for incoming public HTTP traffic
-
-## Quick start
-
-### 1. Install dependencies
+## Quick Start
 
 ```bash
 npm install
+cp .env.example .env.local
+$env:DATABASE_URL="postgresql://user:password@ep-example-pooler.region.aws.neon.tech/neondb?sslmode=require"
+npm run db:migrate
+npm run build
+npm run deploy:local
 ```
 
-### 2. Build
+In another terminal:
+
+```bash
+npm run dev:cli -- connect
+npm run dev:cli -- tunnel http 3000 --subdomain demo
+```
+
+Open `http://localhost:3000/dashboard` for the dashboard. Local development uses `MESHFERRY_ALLOW_DEV_AUTH=true`; production should set Clerk keys and leave development auth disabled.
+
+For hot development instead of built-local deployment:
+
+```bash
+npm run dev:web
+npm run dev:gateway
+```
+
+## PostgreSQL / Neon
+
+Meshferry persists organization data, terminal approvals, reserved subdomains, tunnels, and telemetry in PostgreSQL.
+Use Neon’s pooled connection string in `DATABASE_URL`; Neon’s docs recommend pooled connection strings for apps that create concurrent connections, and the driver works from Node/Next.js through `@neondatabase/serverless`.
+
+```bash
+$env:DATABASE_URL="postgresql://user:password@ep-example-pooler.region.aws.neon.tech/neondb?sslmode=require"
+npm run db:migrate
+```
+
+## Real Control Plane
+
+Meshferry does not accept arbitrary agent tokens. The gateway calls the web control-plane API before any tunnel is opened:
+
+- `/api/control/agent/validate` checks the approved terminal token and subdomain ownership.
+- `/api/control/tunnels/register` creates the live tunnel record shown in the dashboard.
+- `/api/control/tunnels/traffic` records requests and proxied bytes from real gateway traffic.
+- `/api/control/tunnels/offline` marks tunnels offline when the agent disconnects.
+
+The dashboard tunnel inventory is empty until an actual CLI agent connects through the gateway.
+
+## Deployment
+
+Fast local deployment after a build:
 
 ```bash
 npm run build
+npm run deploy:local
 ```
 
-### 3. Start the server
+Docker deployment:
 
 ```bash
-npm run start:server
+MESHFERRY_CONTROL_API_TOKEN=replace-this docker compose up --build
 ```
 
-The defaults are:
+## Production Notes
 
-- control server: `http://127.0.0.1:7000`
-- edge server: `http://127.0.0.1:8080`
-- local dev host: `*.meshferry.localhost`
-- default auth token: `meshferry-dev-token`
+- Put `apps/gateway` behind a wildcard DNS record such as `*.tunnel.example.com`.
+- Set `MESHFERRY_EDGE_DOMAIN=tunnel.example.com` and serve gateway traffic behind TLS.
+- Configure Clerk keys in the web app and keep `CLERK_SECRET_KEY` server-only.
+- Use a strong `MESHFERRY_CONTROL_API_TOKEN` between `apps/gateway` and `apps/web`.
+- Run `npm run db:migrate` during deploy before starting the web control plane.
 
-### 4. Install the CLI locally
+## Tunnel Model
 
-```bash
-npm link
-```
-
-### 5. Start any local HTTP app
-
-Example:
-
-```bash
-python -m http.server 3000
-```
-
-### 6. Open a tunnel
-
-```bash
-meshferry 3000 --subdomain demo
-```
-
-You can also use the explicit form:
-
-```bash
-meshferry http 3000 --subdomain demo --server http://127.0.0.1:7000 --token meshferry-dev-token
-```
-
-If you omit `--subdomain`, MeshFerry derives it from the target port in local development, so `meshferry 3000` defaults to `3000.meshferry.localhost`. Against a non-local server, omit `--subdomain` or pass `--random` to let the server assign a random public URL.
-
-The CLI prints two URLs:
-
-- subdomain route: `http://demo.meshferry.localhost:8080`
-- path fallback: `http://meshferry.localhost:8080/t/demo`
-
-The path fallback is the easiest way to test locally:
-
-```bash
-curl http://meshferry.localhost:8080/t/demo/
-```
-
-You can inspect active tunnels here:
-
-```bash
-meshferry status
-```
-
-If you want raw JSON:
-
-```bash
-meshferry status --json
-```
-
-MeshFerry now keeps a disconnected tunnel leased for `5` minutes by default. During that window the public URL stays reserved, requests return `503` instead of `404`, and the agent will reclaim the same subdomain on reconnect.
-
-For a production-style generated public URL:
-
-```bash
-meshferry http 3000 --random --server https://connect.meshferry.tech
-```
-
-That generated URL now uses a readable shape like `unstable-banana.meshferry.tech` instead of an opaque token string.
-
-## Config file
-
-MeshFerry looks for `meshferry.yml`, `meshferry.yaml`, `.meshferry.yml`, `.meshferry.yaml`, or `meshferry.json` in the current directory.
-
-Use `*.meshferry.localhost` for local development. Do not use `.local` for the public local-dev domain. `.local` is typically reserved for mDNS/Bonjour on local networks and will make routing and TLS harder than necessary.
-
-You can copy [meshferry.yml.example](./meshferry.yml.example) and start with:
-
-```yaml
-server: http://127.0.0.1:7000
-token: meshferry-dev-token
-
-tunnel:
-  local: 3000
-  subdomain: demo
-
-tunnels:
-  app:
-    local: 3000
-    subdomain: app
-  docs:
-    local: http://127.0.0.1:4173
-    subdomain: docs
-```
-
-Then run:
-
-```bash
-meshferry up
-meshferry up docs
-```
-
-## Smoke test
-
-After building, you can run a local end-to-end verification:
-
-```bash
-npm run smoke
-```
-
-The smoke script starts a tiny local HTTP app, the MeshFerry server, the MeshFerry CLI, then performs a request through the edge and prints the result.
-
-## Configuration
-
-Server environment variables:
-
-- `MESHFERRY_AUTH_TOKENS`: comma-separated list of valid agent tokens
-- `MESHFERRY_CONTROL_PORT`: control plane port, default `7000`
-- `MESHFERRY_EDGE_PORT`: edge plane port, default `8080`
-- `MESHFERRY_PUBLIC_HOST`: host used to generate public URLs, default `meshferry.localhost`
-- `MESHFERRY_PUBLIC_SCHEME`: scheme used in generated public URLs, default `http` for localhost and `https` otherwise
-- `MESHFERRY_PUBLIC_PORT`: optional public port override for generated URLs
-- `MESHFERRY_REQUEST_TIMEOUT_MS`: upstream timeout, default `30000`
-- `MESHFERRY_TUNNEL_GRACE_MS`: how long to keep a disconnected tunnel URL reserved, default `300000`
-- `MESHFERRY_HEARTBEAT_INTERVAL_MS`: WebSocket heartbeat interval, default `15000`
-- `MESHFERRY_HEARTBEAT_TIMEOUT_MS`: WebSocket heartbeat timeout, default `45000`
-
-Agent environment variables:
-
-- `MESHFERRY_SERVER`
-- `MESHFERRY_LOCAL`
-- `MESHFERRY_SUBDOMAIN`
-- `MESHFERRY_TOKEN`
-
-CLI flags override environment variables.
-
-## Project layout
-
-```text
-src/
-  cli/
-    config.ts
-    index.ts
-  agent/
-    core.ts
-    index.ts
-  server/
-    index.ts
-  protocol.ts
-```
-
-## Limitations
-
-- HTTP only for now
-- one active agent per subdomain
-- in-memory tunnel registry
-- no persistence, TLS termination, teams, or policy engine yet
-
-## Open source housekeeping
-
-- [Contributing](./CONTRIBUTING.md)
-- [Deployment](./DEPLOYMENT.md)
-- [Roadmap](./ROADMAP.md)
-- MIT license
-- CI workflows in `.github/workflows`
-- production compose and Caddy files for `meshferry.tech`
-- Railway can host the current HTTP/WebSocket version even on a one-domain plan by using only `*.meshferry.tech`
-- Railway config-as-code is in `railway.toml`
+1. A user signs up in the web dashboard.
+2. The dashboard creates a terminal link code for the organization.
+3. The user runs `meshferry connect --code <code>`.
+4. The terminal appears in the dashboard and must be approved there.
+5. The CLI receives an API token only after dashboard approval.
+6. The CLI opens an agent WebSocket to the gateway and registers HTTP, TCP, or UDP tunnels.
+7. The gateway forwards public traffic over the WebSocket to the local port.

@@ -1,169 +1,194 @@
-import { createServer } from "node:http";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { Pool } from "@neondatabase/serverless";
+import dotenv from "dotenv";
+import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { gzipSync } from "node:zlib";
 
-const root = new URL("..", import.meta.url);
-const backendPort = 3000;
-const controlPort = 7000;
-const edgePort = 8080;
-const token = "meshferry-dev-token";
-const subdomain = "demo";
-const processes = [];
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: path.join(root, ".env") });
+dotenv.config({ path: path.join(root, "apps", "web", ".env.local") });
 
-function startServer() {
-  return spawn("node", ["dist/server/index.js"], {
+const nextBin = path.join(root, "apps", "web", "node_modules", "next", "dist", "bin", "next");
+const webPort = 3500 + Math.floor(Math.random() * 400);
+const gatewayPort = 4500 + Math.floor(Math.random() * 400);
+const controlToken = `smoke-control-${Date.now().toString(36)}`;
+const subdomain = `smoke-${Date.now().toString(36)}`;
+const databaseUrl = process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.NEON_DATABASE_URL;
+const children = [];
+let localServer;
+
+if (!databaseUrl) {
+  console.error("DATABASE_URL is required for smoke tests because Meshferry now persists to PostgreSQL/Neon.");
+  process.exit(1);
+}
+
+try {
+  await runMigrations();
+  await cleanupSmokeRows();
+
+  localServer = await listenLocalServer();
+  const localPort = localServer.address().port;
+
+  const web = spawn(process.execPath, [nextBin, "start", "-p", String(webPort)], {
+    cwd: path.join(root, "apps", "web"),
+    env: {
+      ...process.env,
+      PORT: String(webPort),
+      NEXT_PUBLIC_APP_URL: `http://localhost:${webPort}`,
+      NEXT_PUBLIC_GATEWAY_URL: `http://localhost:${gatewayPort}`,
+      DATABASE_URL: databaseUrl,
+      MESHFERRY_CONTROL_API_TOKEN: controlToken,
+      MESHFERRY_ALLOW_DEV_AUTH: "true"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  children.push(web);
+  await waitForHttp(`http://localhost:${webPort}/dashboard`);
+
+  const start = await postJson(`http://localhost:${webPort}/api/devices/start`, {
+    deviceId: "mf_device_smoke",
+    deviceName: "smoke-agent",
+    platform: "smoke"
+  });
+  const approved = await postJson(`http://localhost:${webPort}/api/devices/confirm`, { code: start.code });
+  if (!approved.token || approved.status !== "approved") {
+    throw new Error(`Device approval failed: ${JSON.stringify(approved)}`);
+  }
+
+  const gateway = spawn(process.execPath, ["apps/gateway/dist/index.js"], {
     cwd: root,
     env: {
       ...process.env,
-      MESHFERRY_CONTROL_PORT: `${controlPort}`,
-      MESHFERRY_EDGE_PORT: `${edgePort}`,
-      MESHFERRY_AUTH_TOKENS: token,
-      MESHFERRY_TUNNEL_GRACE_MS: "8000"
+      PORT: String(gatewayPort),
+      MESHFERRY_EDGE_DOMAIN: `localhost:${gatewayPort}`,
+      MESHFERRY_CONTROL_API_URL: `http://localhost:${webPort}`,
+      MESHFERRY_CONTROL_API_TOKEN: controlToken
     },
-    stdio: "inherit"
+    stdio: ["ignore", "pipe", "pipe"]
   });
-}
+  children.push(gateway);
+  await waitForOutput(gateway, "[gateway] listening");
 
-function startAgent() {
-  return spawn(
-    "node",
+  const cli = spawn(
+    process.execPath,
     [
-      "dist/cli/index.js",
-      `${backendPort}`,
+      "apps/cli/dist/index.js",
+      "tunnel",
+      "http",
+      String(localPort),
       "--subdomain",
       subdomain,
-      "--server",
-      `http://127.0.0.1:${controlPort}`,
       "--token",
-      token
+      approved.token,
+      "--org",
+      approved.orgId,
+      "--gateway",
+      `ws://localhost:${gatewayPort}/agent`
     ],
-    {
-      cwd: root,
-      stdio: "inherit"
-    }
+    { cwd: root, stdio: ["ignore", "pipe", "pipe"] }
   );
+  children.push(cli);
+  await waitForOutput(cli, "HTTP tunnel online");
+
+  const response = await fetch(`http://localhost:${gatewayPort}/t/${subdomain}/healthz?from=smoke`);
+  const body = await response.json();
+  if (!response.ok || body.path !== "/healthz?from=smoke") {
+    throw new Error(`Unexpected tunnel response: ${response.status} ${JSON.stringify(body)}`);
+  }
+
+  await delay(700);
+  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const result = await pool.query("SELECT * FROM tunnels WHERE subdomain = $1", [subdomain]);
+  await pool.end();
+  const tunnel = result.rows[0];
+  if (!tunnel || tunnel.status !== "online" || Number(tunnel.requests) < 1 || Number(tunnel.bytes_out) < 1) {
+    throw new Error(`Control-plane telemetry missing: ${JSON.stringify(tunnel)}`);
+  }
+
+  console.log("smoke ok: approved token, live tunnel, forwarding, and dashboard telemetry all work");
+} finally {
+  localServer?.close();
+  for (const child of children) {
+    child.kill();
+  }
 }
 
-const backend = createServer(async (req, res) => {
-  if (req.url === "/style.css") {
-    const css = "body{background:#102030;color:#f5efe4}";
-    const body = gzipSync(Buffer.from(css, "utf8"));
-    res.setHeader("content-type", "text/css; charset=utf-8");
-    res.setHeader("content-encoding", "gzip");
-    res.setHeader("content-length", body.length);
-    res.writeHead(200);
-    res.end(body);
-    return;
-  }
-
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  const body = Buffer.concat(chunks).toString("utf8");
-  const payload = JSON.stringify(
-    {
-      ok: true,
-      method: req.method,
-      url: req.url,
-      body
-    },
-    null,
-    2
-  );
-
-  res.setHeader("content-type", "application/json; charset=utf-8");
-  res.setHeader("content-length", Buffer.byteLength(payload));
-  res.writeHead(200);
-  res.end(payload);
-});
-
-try {
-  await new Promise((resolve) => backend.listen(backendPort, "127.0.0.1", resolve));
-
-  processes.push(startServer());
-
-  await delay(2_000);
-
-  const firstAgent = startAgent();
-  processes.push(firstAgent);
-
-  await delay(3_000);
-
-  const edgeResponse = await fetch(`http://${subdomain}.meshferry.localhost:${edgePort}/smoke`);
-  const assetResponse = await fetch(`http://${subdomain}.meshferry.localhost:${edgePort}/style.css`, {
-    headers: {
-      "accept-encoding": "gzip"
-    }
+async function runMigrations() {
+  const migration = spawn(process.execPath, [path.join(root, "apps", "web", "scripts", "migrate.mjs")], {
+    cwd: path.join(root, "apps", "web"),
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: ["ignore", "pipe", "pipe"]
   });
-  const status = spawnSync(
-    "node",
-    ["dist/cli/index.js", "status", "--json", "--server", `http://127.0.0.1:${controlPort}`],
-    {
-      cwd: root,
-      encoding: "utf8"
-    }
-  );
+  await waitForOutput(migration, "migrations complete");
+}
 
-  firstAgent.kill();
-  await delay(1_000);
+async function cleanupSmokeRows() {
+  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  try {
+    await pool.query("DELETE FROM organizations WHERE id = $1", ["org_development"]);
+  } finally {
+    await pool.end();
+  }
+}
 
-  const disconnectedResponse = await fetch(`http://${subdomain}.meshferry.localhost:${edgePort}/during-disconnect`);
-  const disconnectedBody = await disconnectedResponse.json();
+function listenLocalServer() {
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, path: request.url }));
+  });
 
-  const secondAgent = startAgent();
-  processes.push(secondAgent);
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
 
-  await delay(3_000);
-
-  const resumedResponse = await fetch(`http://${subdomain}.meshferry.localhost:${edgePort}/after-reconnect`);
-
-  if (status.status !== 0) {
-    throw new Error(status.stderr || status.stdout || "Status command failed.");
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(`${url} returned ${response.status}: ${JSON.stringify(payload)}`);
   }
 
-  const result = {
-    tunnels: JSON.parse(status.stdout),
-    edgeStatus: edgeResponse.status,
-    edgeBody: await edgeResponse.json(),
-    assetStatus: assetResponse.status,
-    assetEncoding: assetResponse.headers.get("content-encoding"),
-    assetBody: await assetResponse.text(),
-    disconnectedStatus: disconnectedResponse.status,
-    disconnectedBody,
-    resumedStatus: resumedResponse.status,
-    resumedBody: await resumedResponse.json()
+  return payload;
+}
+
+async function waitForHttp(url) {
+  for (let index = 0; index < 160; index += 1) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return;
+    } catch {
+      // Server is still booting.
+    }
+    await delay(250);
+  }
+
+  throw new Error(`Timed out waiting for ${url}`);
+}
+
+async function waitForOutput(child, needle) {
+  let output = "";
+  const onData = (data) => {
+    output += data.toString();
   };
 
-  if (result.assetBody !== "body{background:#102030;color:#f5efe4}") {
-    throw new Error(`Compressed asset proxying failed. Received: ${result.assetBody}`);
-  }
+  child.stdout.on("data", onData);
+  child.stderr.on("data", onData);
 
-  if (result.assetEncoding !== null) {
-    throw new Error(`Compressed asset proxying leaked content-encoding=${result.assetEncoding}.`);
-  }
-
-  if (result.disconnectedStatus !== 503) {
-    throw new Error(`Expected a 503 during disconnect, received ${result.disconnectedStatus}.`);
-  }
-
-  if (!String(result.disconnectedBody.error ?? "").includes("temporarily disconnected")) {
-    throw new Error(`Unexpected disconnect response: ${JSON.stringify(result.disconnectedBody)}`);
-  }
-
-  if (result.resumedStatus !== 200) {
-    throw new Error(`Expected tunnel to resume after reconnect, received ${result.resumedStatus}.`);
-  }
-
-  console.log(JSON.stringify(result, null, 2));
-} finally {
-  for (const child of processes) {
-    if (!child.killed) {
-      child.kill();
+  for (let index = 0; index < 120; index += 1) {
+    if (output.includes(needle)) return output;
+    if (child.exitCode !== null) {
+      throw new Error(`Process exited before "${needle}". Output:\n${output}`);
     }
+    await delay(100);
   }
 
-  await new Promise((resolve) => backend.close(resolve));
+  throw new Error(`Timed out waiting for "${needle}". Output:\n${output}`);
 }
