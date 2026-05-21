@@ -27,6 +27,22 @@ npm run dev:cli -- connect
 npm run dev:cli -- tunnel http 3000 --subdomain demo
 ```
 
+OutRay-style shortcuts are also supported:
+
+```bash
+npm run dev:cli -- http 3000 --subdomain demo
+npm run dev:cli -- tcp 5432 --remote-port 25432
+npm run dev:cli -- udp 514 --remote-port 1514
+```
+
+For multiple tunnels, copy `outray/config.example.toml` to `outray/config.toml`, add the approved token from
+`meshferry connect`, then run:
+
+```bash
+npm run dev:cli -- validate-config
+npm run dev:cli -- start
+```
+
 Open `http://localhost:3000/dashboard` for the dashboard. Local development uses `MESHFERRY_ALLOW_DEV_AUTH=true`; production should set Clerk keys and leave development auth disabled.
 
 For hot development instead of built-local deployment:
@@ -39,7 +55,7 @@ npm run dev:gateway
 ## PostgreSQL / Neon
 
 Meshferry persists organization data, terminal approvals, reserved subdomains, tunnels, and telemetry in PostgreSQL.
-Use Neon’s pooled connection string in `DATABASE_URL`; Neon’s docs recommend pooled connection strings for apps that create concurrent connections, and the driver works from Node/Next.js through `@neondatabase/serverless`.
+Use Neon's pooled connection string in `DATABASE_URL`; Neon recommends pooled connection strings for apps that create concurrent connections, and the driver works from Node/Next.js through `@neondatabase/serverless`.
 
 ```bash
 $env:DATABASE_URL="postgresql://user:password@ep-example-pooler.region.aws.neon.tech/neondb?sslmode=require"
@@ -52,10 +68,20 @@ Meshferry does not accept arbitrary agent tokens. The gateway calls the web cont
 
 - `/api/control/agent/validate` checks the approved terminal token and subdomain ownership.
 - `/api/control/tunnels/register` creates the live tunnel record shown in the dashboard.
-- `/api/control/tunnels/traffic` records requests and proxied bytes from real gateway traffic.
+- `/api/control/tunnels/traffic` records requests, proxied bytes, status codes, latency, and request paths from real gateway traffic.
 - `/api/control/tunnels/offline` marks tunnels offline when the agent disconnects.
 
-The dashboard tunnel inventory is empty until an actual CLI agent connects through the gateway.
+The dashboard tunnel inventory and request inspector are empty until an actual CLI agent connects through the gateway and serves traffic.
+
+## Request Inspector
+
+Meshferry records gateway events in PostgreSQL:
+
+- HTTP requests include method, path, status, ingress bytes, egress bytes, and duration.
+- TCP connections are captured when a public socket connects to a tunnel.
+- UDP packets are captured when the gateway receives datagrams for a tunnel.
+
+These records are visible in the dashboard and are verified by `npm run smoke`.
 
 ## Deployment
 

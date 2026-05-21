@@ -14,7 +14,8 @@
   "dependencies": {
     "@meshferry/core": "file:../../packages/core",
     "commander": "^12.1.0",
-    "ws": "^8.18.0"
+    "smol-toml": "^1.6.1",
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.14",

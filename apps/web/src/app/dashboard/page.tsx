@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { getViewer } from "@/lib/auth";
 import { getDashboardState } from "@/lib/store";
 import { gatewayHttpUrl } from "@/lib/utils";
-import { Activity, Cable, Clock3, Globe2, KeyRound, Network, Server } from "lucide-react";
+import { Activity, Cable, Clock3, Globe2, KeyRound, ListChecks, Network, Server, TimerReset } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -171,6 +171,52 @@ export default async function DashboardPage() {
               </div>
             </section>
           </section>
+
+          <section className="mesh-panel overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#deded6] px-5 py-4">
+              <div>
+                <h2 className="text-lg font-bold">Request inspector</h2>
+                <p className="mt-1 text-sm text-[#6a6f68]">
+                  Live gateway events from real proxied HTTP, TCP, and UDP traffic.
+                </p>
+              </div>
+              <ListChecks size={19} className="text-[#087f8c]" />
+            </div>
+            <div className="divide-y divide-[#deded6]">
+              {state.events.length === 0 ? (
+                <div className="px-5 py-8 text-center text-sm text-[#6a6f68]">
+                  No edge events yet. Send traffic through a live tunnel to populate the inspector.
+                </div>
+              ) : null}
+              {state.events.map((event) => (
+                <div key={event.id} className="grid gap-3 px-5 py-4 md:grid-cols-[150px_minmax(0,1fr)_220px]">
+                  <div className="flex items-start gap-2">
+                    <Badge tone={event.protocol === "http" ? "teal" : event.protocol === "tcp" ? "green" : "violet"}>
+                      {event.protocol.toUpperCase()}
+                    </Badge>
+                    {event.status ? <Badge tone={statusTone(event.status)}>{event.status}</Badge> : null}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-[#171717]">{formatEventName(event.eventType)}</span>
+                      {event.method ? <span className="font-mono text-xs text-[#6a6f68]">{event.method}</span> : null}
+                    </div>
+                    <div className="mt-1 truncate font-mono text-xs text-[#4f554d]">
+                      {event.path ?? event.tunnelId ?? "raw socket event"}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-[#6a6f68] md:justify-end">
+                    <span className="inline-flex items-center gap-1">
+                      <TimerReset size={14} />
+                      {formatDuration(event.durationMs)}
+                    </span>
+                    <span>{formatBytes(event.bytesIn + event.bytesOut)}</span>
+                    <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         </div>
       </section>
     </main>
@@ -182,4 +228,23 @@ function formatBytes(value: number): string {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
   return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+function formatDuration(value?: number): string {
+  if (value === undefined) return "live";
+  if (value < 1000) return `${value} ms`;
+  return `${(value / 1000).toFixed(2)} s`;
+}
+
+function formatEventName(value: string): string {
+  return value
+    .split("_")
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function statusTone(status: number): "green" | "amber" | "coral" {
+  if (status < 300) return "green";
+  if (status < 500) return "amber";
+  return "coral";
 }

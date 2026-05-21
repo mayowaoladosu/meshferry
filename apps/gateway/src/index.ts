@@ -33,6 +33,9 @@ type PendingHttpRequest = {
   response: ServerResponse;
   timeout: NodeJS.Timeout;
   bytesIn: number;
+  method: string;
+  path: string;
+  startedAt: number;
 };
 
 type RegisteredTunnel = {
@@ -269,19 +272,32 @@ async function routeHttpRequest(request: IncomingMessage, response: ServerRespon
 
   const body = await readRequestBody(request, maxBodyBytes);
   const requestId = nanoid(16);
+  const method = request.method ?? "GET";
+  const startedAt = Date.now();
   const timeout = setTimeout(() => {
     tunnel.pendingHttp.delete(requestId);
+    const payload = JSON.stringify({ error: "agent_timeout" });
     if (!response.headersSent) {
       response.writeHead(504, { "content-type": "application/json" });
     }
-    response.end(JSON.stringify({ error: "agent_timeout" }));
+    response.end(payload);
+    void reportTunnelTraffic(tunnel.id, {
+      requests: 1,
+      bytesIn: body.length,
+      bytesOut: Buffer.byteLength(payload),
+      eventType: "http_timeout",
+      method,
+      path,
+      status: 504,
+      durationMs: Date.now() - startedAt
+    });
   }, requestTimeoutMs);
 
-  tunnel.pendingHttp.set(requestId, { response, timeout, bytesIn: body.length });
+  tunnel.pendingHttp.set(requestId, { response, timeout, bytesIn: body.length, method, path, startedAt });
   send(tunnel.ws, {
     type: "proxy.http.request",
     requestId,
-    method: request.method ?? "GET",
+    method,
     path,
     headers: normalizeHeaders(request.headers),
     body: encodeBody(body)
@@ -355,7 +371,16 @@ function completeHttpRequest(tunnel: RegisteredTunnel, message: HttpProxyRespons
   const body = decodeBody(message.body);
   pending.response.writeHead(message.status, headers);
   pending.response.end(body);
-  void reportTunnelTraffic(tunnel.id, { requests: 1, bytesIn: pending.bytesIn, bytesOut: body.length });
+  void reportTunnelTraffic(tunnel.id, {
+    requests: 1,
+    bytesIn: pending.bytesIn,
+    bytesOut: body.length,
+    eventType: "http_request",
+    method: pending.method,
+    path: pending.path,
+    status: message.status,
+    durationMs: Date.now() - pending.startedAt
+  });
 }
 
 async function startTcpIngress(tunnel: RegisteredTunnel, requestedPort?: number): Promise<net.Server> {
@@ -363,7 +388,7 @@ async function startTcpIngress(tunnel: RegisteredTunnel, requestedPort?: number)
     const streamId = nanoid(16);
     tunnel.tcpSockets.set(streamId, socket);
     send(tunnel.ws, { type: "proxy.tcp.open", streamId });
-    void reportTunnelTraffic(tunnel.id, { requests: 1 });
+    void reportTunnelTraffic(tunnel.id, { requests: 1, eventType: "tcp_connection" });
 
     socket.on("data", (chunk) => {
       send(tunnel.ws, { type: "proxy.tcp.data", streamId, body: encodeBody(chunk) });
@@ -399,7 +424,7 @@ async function startUdpIngress(tunnel: RegisteredTunnel, requestedPort?: number)
     const remoteId = `${remote.address}:${remote.port}`;
     tunnel.udpRemotes.set(remoteId, remote);
     send(tunnel.ws, { type: "proxy.udp.packet", remoteId, body: encodeBody(message) });
-    void reportTunnelTraffic(tunnel.id, { requests: 1, bytesIn: message.length });
+    void reportTunnelTraffic(tunnel.id, { requests: 1, bytesIn: message.length, eventType: "udp_packet" });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -513,7 +538,16 @@ async function registerTunnelWithControlPlane(input: {
 
 async function reportTunnelTraffic(
   id: string,
-  metrics: { requests?: number; bytesIn?: number; bytesOut?: number }
+  metrics: {
+    requests?: number;
+    bytesIn?: number;
+    bytesOut?: number;
+    eventType?: string;
+    method?: string;
+    path?: string;
+    status?: number;
+    durationMs?: number;
+  }
 ): Promise<void> {
   await postControlPlane("/api/control/tunnels/traffic", { id, ...metrics }).catch((error: unknown) => {
     console.error("[gateway] telemetry update failed", error);

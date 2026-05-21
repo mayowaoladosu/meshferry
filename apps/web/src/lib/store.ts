@@ -49,6 +49,21 @@ export type TunnelRecord = {
   lastSeenAt: string;
 };
 
+export type TunnelEvent = {
+  id: number;
+  tunnelId?: string;
+  orgId: string;
+  protocol: "http" | "tcp" | "udp";
+  eventType: string;
+  method?: string;
+  path?: string;
+  status?: number;
+  bytesIn: number;
+  bytesOut: number;
+  durationMs?: number;
+  createdAt: string;
+};
+
 type OrganizationRow = {
   id: string;
   name: string;
@@ -94,13 +109,29 @@ type TunnelRow = {
   last_seen_at: Date | string;
 };
 
+type TunnelEventRow = {
+  id: string | number | bigint;
+  tunnel_id: string | null;
+  org_id: string;
+  protocol: "http" | "tcp" | "udp";
+  event_type: string;
+  method: string | null;
+  path: string | null;
+  status: number | null;
+  bytes_in: string | number | bigint;
+  bytes_out: string | number | bigint;
+  duration_ms: number | null;
+  created_at: Date | string;
+};
+
 export async function getDashboardState(viewer: { orgId: string; userId: string; name: string }) {
   const org = await ensureOrganization(viewer);
   const activeLink = await ensureActiveDeviceLink(org.id);
-  const [subdomains, devices, tunnels] = await Promise.all([
+  const [subdomains, devices, tunnels, events] = await Promise.all([
     query<SubdomainRow>("SELECT * FROM subdomains WHERE org_id = $1 ORDER BY created_at DESC", [org.id]),
     query<DeviceLinkRow>("SELECT * FROM device_links WHERE org_id = $1 ORDER BY created_at DESC LIMIT 6", [org.id]),
-    query<TunnelRow>("SELECT * FROM tunnels WHERE org_id = $1 ORDER BY last_seen_at DESC", [org.id])
+    query<TunnelRow>("SELECT * FROM tunnels WHERE org_id = $1 ORDER BY last_seen_at DESC", [org.id]),
+    query<TunnelEventRow>("SELECT * FROM tunnel_events WHERE org_id = $1 ORDER BY created_at DESC LIMIT 12", [org.id])
   ]);
 
   return {
@@ -109,6 +140,7 @@ export async function getDashboardState(viewer: { orgId: string; userId: string;
     subdomains: subdomains.map(mapSubdomain),
     devices: devices.map(mapDeviceLink),
     tunnels: tunnels.map(mapTunnel),
+    events: events.map(mapTunnelEvent),
     gatewayUrl: gatewayWebSocketUrl()
   };
 }
@@ -422,6 +454,11 @@ export async function recordTunnelTraffic(input: {
   requests?: number;
   bytesIn?: number;
   bytesOut?: number;
+  eventType?: string;
+  method?: string;
+  path?: string;
+  status?: number;
+  durationMs?: number;
 }): Promise<TunnelRecord | undefined> {
   const row = await queryOne<TunnelRow>(
     `
@@ -435,6 +472,38 @@ export async function recordTunnelTraffic(input: {
     `,
     [input.id, input.requests ?? 0, input.bytesIn ?? 0, input.bytesOut ?? 0]
   );
+
+  if (row && input.eventType) {
+    await query(
+      `
+        INSERT INTO tunnel_events (
+          tunnel_id,
+          org_id,
+          protocol,
+          event_type,
+          method,
+          path,
+          status,
+          bytes_in,
+          bytes_out,
+          duration_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `,
+      [
+        row.id,
+        row.org_id,
+        row.protocol,
+        input.eventType,
+        input.method ?? null,
+        input.path ?? null,
+        input.status ?? null,
+        input.bytesIn ?? 0,
+        input.bytesOut ?? 0,
+        input.durationMs ?? null
+      ]
+    );
+  }
 
   return row ? mapTunnel(row) : undefined;
 }
@@ -531,6 +600,23 @@ function mapTunnel(row: TunnelRow): TunnelRecord {
     gatewayId: row.gateway_id,
     connectedAt: toIsoString(row.connected_at) ?? new Date().toISOString(),
     lastSeenAt: toIsoString(row.last_seen_at) ?? new Date().toISOString()
+  };
+}
+
+function mapTunnelEvent(row: TunnelEventRow): TunnelEvent {
+  return {
+    id: toNumber(row.id),
+    tunnelId: row.tunnel_id ?? undefined,
+    orgId: row.org_id,
+    protocol: row.protocol,
+    eventType: row.event_type,
+    method: row.method ?? undefined,
+    path: row.path ?? undefined,
+    status: row.status ?? undefined,
+    bytesIn: toNumber(row.bytes_in),
+    bytesOut: toNumber(row.bytes_out),
+    durationMs: row.duration_ms ?? undefined,
+    createdAt: toIsoString(row.created_at) ?? new Date().toISOString()
   };
 }
 

@@ -1,0 +1,28 @@
+[global]
+server_url = "ws://localhost:4040/agent"
+# token = "mf_live_replace_with_approved_terminal_token"
+# org = "org_development"
+
+[tunnel.web]
+protocol = "http"
+local_host = "127.0.0.1"
+local_port = 3000
+subdomain = "web-dev"
+
+[tunnel.api]
+protocol = "http"
+local_host = "127.0.0.1"
+local_port = 8000
+subdomain = "api-dev"
+
+[tunnel.database]
+protocol = "tcp"
+local_host = "127.0.0.1"
+local_port = 5432
+remote_port = 25432
+
+[tunnel.syslog]
+protocol = "udp"
+local_host = "127.0.0.1"
+local_port = 514
+remote_port = 1514

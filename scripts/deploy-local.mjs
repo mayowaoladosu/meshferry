@@ -15,6 +15,8 @@ const webPort = process.env.MESHFERRY_WEB_PORT ?? "3000";
 const gatewayPort = process.env.MESHFERRY_GATEWAY_PORT ?? "4040";
 const controlToken = process.env.MESHFERRY_CONTROL_API_TOKEN ?? "dev-control-token";
 const databaseUrl = process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.NEON_DATABASE_URL;
+const allowDevAuth = process.env.MESHFERRY_ALLOW_DEV_AUTH ?? (process.env.CLERK_SECRET_KEY ? "false" : "true");
+const forceDevAuth = allowDevAuth === "true";
 
 const requiredBuildArtifacts = [
   path.join(root, "apps", "web", ".next", "BUILD_ID"),
@@ -52,7 +54,9 @@ const web = startService("web", process.execPath, [nextBin, "start", "-p", webPo
   NEXT_PUBLIC_GATEWAY_URL: `http://localhost:${gatewayPort}`,
   DATABASE_URL: databaseUrl,
   MESHFERRY_CONTROL_API_TOKEN: controlToken,
-  MESHFERRY_ALLOW_DEV_AUTH: process.env.CLERK_SECRET_KEY ? "false" : "true"
+  MESHFERRY_ALLOW_DEV_AUTH: allowDevAuth,
+  CLERK_SECRET_KEY: forceDevAuth ? "" : process.env.CLERK_SECRET_KEY,
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: forceDevAuth ? "" : process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
 }, path.join(root, "apps", "web"));
 
 const gateway = startService("gateway", process.execPath, ["apps/gateway/dist/index.js"], {

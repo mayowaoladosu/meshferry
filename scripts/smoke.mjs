@@ -40,7 +40,8 @@ try {
       NEXT_PUBLIC_GATEWAY_URL: `http://localhost:${gatewayPort}`,
       DATABASE_URL: databaseUrl,
       MESHFERRY_CONTROL_API_TOKEN: controlToken,
-      MESHFERRY_ALLOW_DEV_AUTH: "true"
+      MESHFERRY_ALLOW_DEV_AUTH: "true",
+      CLERK_SECRET_KEY: ""
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -101,13 +102,21 @@ try {
   await delay(700);
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   const result = await pool.query("SELECT * FROM tunnels WHERE subdomain = $1", [subdomain]);
+  const events = await pool.query(
+    "SELECT * FROM tunnel_events WHERE org_id = $1 AND event_type = $2 ORDER BY created_at DESC LIMIT 1",
+    ["org_development", "http_request"]
+  );
   await pool.end();
   const tunnel = result.rows[0];
   if (!tunnel || tunnel.status !== "online" || Number(tunnel.requests) < 1 || Number(tunnel.bytes_out) < 1) {
     throw new Error(`Control-plane telemetry missing: ${JSON.stringify(tunnel)}`);
   }
+  const event = events.rows[0];
+  if (!event || event.method !== "GET" || event.path !== "/healthz?from=smoke" || Number(event.status) !== 200) {
+    throw new Error(`Request event missing: ${JSON.stringify(event)}`);
+  }
 
-  console.log("smoke ok: approved token, live tunnel, forwarding, and dashboard telemetry all work");
+  console.log("smoke ok: approved token, live tunnel, forwarding, request logs, and dashboard telemetry all work");
 } finally {
   localServer?.close();
   for (const child of children) {
@@ -151,7 +160,13 @@ async function postJson(url, body) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
   });
-  const payload = await response.json();
+  const text = await response.text();
+  let payload;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (error) {
+    throw new Error(`${url} returned non-JSON ${response.status}: ${text}\n${error.message}`);
+  }
   if (!response.ok) {
     throw new Error(`${url} returned ${response.status}: ${JSON.stringify(payload)}`);
   }
